@@ -2775,6 +2775,357 @@ const ClientList = ({ clients, onCreateClient, onSelectClient, onDeleteClient })
   );
 };
 
+const FirmOverview = ({ clients }: any) => {
+    const [activeTab, setActiveTab] = useState('Stocks');
+    const [sortConfig, setSortConfig] = useState({ key: 'totalValue', direction: 'desc' });
+    const [assets, setAssets] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [progress, setProgress] = useState('');
+    
+    useEffect(() => {
+        let totalFirmAUM = 0;
+        const assetMap = new Map();
+
+        clients.forEach((client: any) => {
+            const accounts = client.accounts || [{ positions: client.positions || [] }];
+            accounts.forEach((acc: any) => {
+                const positions = acc.positions || [];
+                positions.forEach((p: any) => {
+                    const val = Number(p.currentValue) || 0;
+                    totalFirmAUM += val;
+
+                    const symbol = p.symbol.toUpperCase();
+                    if (CASH_TICKERS.some(t => symbol.includes(t)) || (p.description && p.description.toUpperCase().includes('CASH')) || p.metadata?.assetClass === 'Cash') {
+                        return;
+                    }
+
+                    if (!assetMap.has(symbol)) {
+                        let bucket = 'Stocks';
+                        const isFi = p.metadata?.assetClass === 'Fixed Income' || p.metadata?.assetClass === 'Municipal Bond' || isBond(symbol, p.description);
+                        if (isFi) {
+                            bucket = 'Bonds';
+                        } else if ((symbol.length === 5 && symbol.endsWith('X')) || (p.description && (p.description.toUpperCase().includes('ETF') || p.description.toUpperCase().includes('FUND') || p.description.toUpperCase().includes('TRUST')))) {
+                            bucket = 'Funds & ETFs';
+                        }
+
+                        assetMap.set(symbol, {
+                            symbol,
+                            description: p.description,
+                            bucket,
+                            totalValue: 0,
+                            pctAUM: 0,
+                            perf: { '1D': null, '1M': null, '3M': null, '6M': null, 'YTD': null, '1Y': null, '3Y': null, '5Y': null }
+                        });
+                    }
+                    
+                    const existing = assetMap.get(symbol);
+                    existing.totalValue += val;
+                });
+            });
+        });
+
+        const uniqueAssets = Array.from(assetMap.values()).map((a: any) => ({
+            ...a,
+            pctAUM: totalFirmAUM > 0 ? (a.totalValue / totalFirmAUM) * 100 : 0
+        }));
+
+        setAssets(uniqueAssets);
+        fetchPerformance(uniqueAssets);
+    }, [clients]);
+
+    const fetchPerformance = async (uniqueAssets: any[]) => {
+        setLoading(true);
+        setProgress('Fetching historical data...');
+        const end = Math.floor(Date.now() / 1000);
+        const start = end - (5 * 365 * 24 * 60 * 60);
+        
+        const toFetch = uniqueAssets.filter(a => a.bucket !== 'Bonds');
+        const batchSize = 5;
+        const dataCache: any = {};
+        const inFlightRequests = new Map();
+        let keyIndex = 0;
+
+        const fetchTiingo = async (symbol: string, startTimestamp: number) => {
+            const cleanSymbol = symbol.toUpperCase().replace(/[\.\/]/g, '-');
+            const cacheKey = `tiingo_${cleanSymbol}_5Y`; 
+            if (dataCache[cleanSymbol]) return dataCache[cleanSymbol];
+            if (inFlightRequests.has(cacheKey)) return inFlightRequests.get(cacheKey);
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+                try {
+                    const parsed = JSON.parse(cached);
+                    if (Date.now() - parsed.timestamp < 24 * 60 * 60 * 1000) {
+                        dataCache[cleanSymbol] = parsed.data;
+                        return parsed.data;
+                    }
+                } catch (e) {}
+            }
+
+            const fetchPromise = (async () => {
+                let attempts = 0;
+                const keys = getTiingoKeys();
+                if (keys.length === 0) throw new Error("No API keys");
+                const maxAttempts = keys.length * 2;
+                while (attempts < maxAttempts) {
+                    const currentKey = keys[keyIndex % keys.length];
+                    const startDate = new Date(startTimestamp * 1000).toISOString().split('T')[0];
+                    const url = `https://api.tiingo.com/tiingo/daily/${cleanSymbol}/prices?startDate=${startDate}&resampleFreq=daily&token=${currentKey}`;
+                    let jsonResponse = null;
+                    try {
+                        try {
+                            const res = await fetch(url);
+                            if (res.status === 429) throw new Error("429");
+                            if (res.ok) jsonResponse = await res.json();
+                        } catch (e: any) { if (e.message === "429") throw e; }
+
+                        if (!jsonResponse) {
+                            try {
+                                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+                                const res = await fetch(proxyUrl);
+                                if (res.status === 429) throw new Error("429");
+                                if (res.ok) jsonResponse = await res.json();
+                            } catch (e: any) { if (e.message === "429") throw e; }
+                        }
+
+                        if (!jsonResponse) {
+                            try {
+                                const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+                                const res = await fetch(proxyUrl);
+                                if (res.ok) {
+                                    const wrapper = await res.json();
+                                    if (wrapper.contents) {
+                                        const parsed = JSON.parse(wrapper.contents);
+                                        if (parsed.detail && parsed.detail.includes("throttle")) throw new Error("429");
+                                        jsonResponse = parsed;
+                                    }
+                                }
+                            } catch (e: any) { if (e.message === "429") throw e; }
+                        }
+
+                        if (jsonResponse && Array.isArray(jsonResponse) && jsonResponse.length > 0) {
+                            const normalized = { t: jsonResponse.map((d: any) => new Date(d.date).getTime() / 1000), c: jsonResponse.map((d: any) => d.adjClose || d.close) };
+                            safeSetItem(cacheKey, JSON.stringify({ timestamp: Date.now(), data: normalized }));
+                            dataCache[cleanSymbol] = normalized;
+                            trackApiUsage(currentKey); 
+                            return normalized;
+                        }
+                        throw new Error("Fetch failed");
+                    } catch (err) {
+                        keyIndex++;
+                        attempts++;
+                        await new Promise(r => setTimeout(r, 1000 + (attempts * 500)));
+                    }
+                }
+                throw new Error(`Max retries exceeded for ${cleanSymbol}`);
+            })();
+
+            inFlightRequests.set(cacheKey, fetchPromise);
+            try { return await fetchPromise; } finally { inFlightRequests.delete(cacheKey); }
+        };
+
+        for (let i = 0; i < toFetch.length; i += batchSize) {
+            const batch = toFetch.slice(i, i + batchSize);
+            setProgress(`Fetching assets... ${i}/${toFetch.length}`);
+            await Promise.allSettled(batch.map(async (a) => {
+                try { await fetchTiingo(a.symbol, start); } catch(e) {}
+            }));
+        }
+
+        const now = Date.now();
+        const ytdStart = new Date(new Date().getFullYear(), 0, 1).getTime();
+        
+        const getReturn = (data: any, targetTimeMs: number) => {
+            if (!data || !data.t || data.t.length < 2) return null;
+            const currentClose = data.c[data.c.length - 1];
+            const targetTimeSec = targetTimeMs / 1000;
+            
+            let closestIdx = -1;
+            let minDiff = Infinity;
+            for (let i = 0; i < data.t.length; i++) {
+                const diff = Math.abs(data.t[i] - targetTimeSec);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestIdx = i;
+                }
+            }
+            
+            if (closestIdx === -1 || minDiff > 7 * 24 * 60 * 60) return null;
+            
+            const historicalClose = data.c[closestIdx];
+            if (!historicalClose) return null;
+            return (currentClose / historicalClose) - 1;
+        };
+
+        const updatedAssets = uniqueAssets.map(a => {
+            if (a.bucket === 'Bonds') return a;
+            const cleanSymbol = a.symbol.toUpperCase().replace(/[\.\/]/g, '-');
+            const data = dataCache[cleanSymbol];
+            if (!data || !data.c || data.c.length < 2) return a;
+            
+            const currentClose = data.c[data.c.length - 1];
+            const prevClose = data.c[data.c.length - 2];
+            
+            return {
+                ...a,
+                perf: {
+                    '1D': prevClose ? (currentClose / prevClose) - 1 : null,
+                    '1M': getReturn(data, now - (30 * 24 * 60 * 60 * 1000)),
+                    '3M': getReturn(data, now - (90 * 24 * 60 * 60 * 1000)),
+                    '6M': getReturn(data, now - (180 * 24 * 60 * 60 * 1000)),
+                    'YTD': getReturn(data, ytdStart),
+                    '1Y': getReturn(data, now - (365 * 24 * 60 * 60 * 1000)),
+                    '3Y': getReturn(data, now - (3 * 365 * 24 * 60 * 60 * 1000)),
+                    '5Y': getReturn(data, now - (5 * 365 * 24 * 60 * 60 * 1000)),
+                }
+            };
+        });
+
+        setAssets(updatedAssets);
+        setLoading(false);
+    };
+
+    const handleSort = (key: string) => {
+        setSortConfig(prev => ({
+            key,
+            direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+        }));
+    };
+
+    const sortedAssets = useMemo(() => {
+        const filtered = assets.filter(a => a.bucket === activeTab);
+        if (!sortConfig.key) return filtered;
+
+        return [...filtered].sort((a, b) => {
+            let valA = a[sortConfig.key];
+            let valB = b[sortConfig.key];
+            
+            if (sortConfig.key.startsWith('perf.')) {
+                const perfKey = sortConfig.key.split('.')[1];
+                valA = a.perf[perfKey];
+                valB = b.perf[perfKey];
+            }
+
+            if (valA === null || valA === undefined) return 1;
+            if (valB === null || valB === undefined) return -1;
+
+            if (typeof valA === 'string') {
+                return sortConfig.direction === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+            }
+            return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
+        });
+    }, [assets, activeTab, sortConfig]);
+
+    const renderSortIcon = (key: string) => {
+        if (sortConfig.key !== key) return null;
+        return sortConfig.direction === 'asc' ? <ChevronUp className="inline h-3 w-3 ml-1" /> : <ChevronDown className="inline h-3 w-3 ml-1" />;
+    };
+
+    const formatPerf = (val: any) => {
+        if (val === null || val === undefined) return <span className="text-zinc-600">--</span>;
+        const num = Number(val) * 100;
+        return <span className={num >= 0 ? 'text-green-400' : 'text-red-400'}>{num > 0 ? '+' : ''}{num.toFixed(2)}%</span>;
+    };
+
+    const columns = activeTab === 'Bonds' 
+        ? [
+            { key: 'symbol', label: 'Ticker' },
+            { key: 'description', label: 'Asset Name' },
+            { key: 'totalValue', label: 'Total Firm Value ($)' },
+            { key: 'pctAUM', label: '% of Firm AUM' }
+        ]
+        : [
+            { key: 'symbol', label: 'Ticker' },
+            { key: 'description', label: 'Asset Name' },
+            { key: 'totalValue', label: 'Total Firm Value ($)' },
+            { key: 'pctAUM', label: '% of Firm AUM' },
+            { key: 'perf.1D', label: '1D' },
+            { key: 'perf.1M', label: '1M' },
+            { key: 'perf.3M', label: '3M' },
+            { key: 'perf.6M', label: '6M' },
+            { key: 'perf.YTD', label: 'YTD' },
+            { key: 'perf.1Y', label: '1Y' },
+            { key: 'perf.3Y', label: '3Y' },
+            { key: 'perf.5Y', label: '5Y' },
+        ];
+
+    return (
+        <div className="p-8 max-w-7xl mx-auto h-full flex flex-col">
+            <div className="mb-8">
+                <h1 className="text-3xl font-black text-white tracking-tighter mb-2">Firm Overview</h1>
+                <p className="text-zinc-500 font-medium">Aggregate position exposure and performance across all clients.</p>
+            </div>
+
+            <div className="flex bg-zinc-950 p-1 rounded-xl mb-6 border border-zinc-800 w-fit">
+                {['Stocks', 'Funds & ETFs', 'Bonds'].map(tab => (
+                    <button
+                        key={tab}
+                        onClick={() => setActiveTab(tab)}
+                        className={`px-6 py-2 text-xs font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === tab ? 'bg-zinc-800 text-white shadow-md' : 'text-zinc-500 hover:text-zinc-300'}`}
+                    >
+                        {tab}
+                    </button>
+                ))}
+            </div>
+
+            <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-2xl overflow-hidden flex flex-col">
+                {loading ? (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-4 text-zinc-500">
+                        <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+                        <span className="text-xs font-black uppercase tracking-widest">{progress}</span>
+                    </div>
+                ) : (
+                    <div className="overflow-auto custom-scrollbar flex-1">
+                        <table className="w-full text-left border-collapse">
+                            <thead className="sticky top-0 bg-zinc-900 border-b border-zinc-800 z-10">
+                                <tr>
+                                    {columns.map(col => (
+                                        <th 
+                                            key={col.key} 
+                                            onClick={() => handleSort(col.key)}
+                                            className="p-4 text-[10px] font-black uppercase tracking-widest text-zinc-500 cursor-pointer hover:text-zinc-300 transition-colors whitespace-nowrap"
+                                        >
+                                            {col.label} {renderSortIcon(col.key)}
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedAssets.map((a, i) => (
+                                    <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
+                                        <td className="p-4 font-bold text-white">{a.symbol}</td>
+                                        <td className="p-4 text-zinc-400 text-sm truncate max-w-[200px]">{a.description}</td>
+                                        <td className="p-4 font-mono text-zinc-300">{formatCurrency(a.totalValue)}</td>
+                                        <td className="p-4 font-mono text-zinc-300">{a.pctAUM.toFixed(2)}%</td>
+                                        {activeTab !== 'Bonds' && (
+                                            <>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['1D'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['1M'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['3M'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['6M'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['YTD'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['1Y'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['3Y'])}</td>
+                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['5Y'])}</td>
+                                            </>
+                                        )}
+                                    </tr>
+                                ))}
+                                {sortedAssets.length === 0 && (
+                                    <tr>
+                                        <td colSpan={columns.length} className="p-8 text-center text-zinc-500 font-medium">
+                                            No assets found in this category.
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
 export default function App() {
   const [view, setView] = useState('clients');
   const [clients, setClients] = useState(() => {
@@ -2810,6 +3161,7 @@ export default function App() {
             <div className="flex flex-col gap-4 w-full px-2 flex-1">
                 <button onClick={() => setView('clients')} className={`h-12 w-12 mx-auto rounded-xl flex items-center justify-center transition-all ${view === 'clients' ? 'bg-zinc-800 text-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}><Users className="h-5 w-5" /></button>
                 <button onClick={() => setView('models')} className={`h-12 w-12 mx-auto rounded-xl flex items-center justify-center transition-all ${view === 'models' ? 'bg-zinc-800 text-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}><Layers className="h-5 w-5" /></button>
+                <button onClick={() => setView('firm')} className={`h-12 w-12 mx-auto rounded-xl flex items-center justify-center transition-all ${view === 'firm' ? 'bg-zinc-800 text-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}><Globe className="h-5 w-5" /></button>
             </div>
             <div className="w-full px-2 mt-auto">
                  <button onClick={() => setShowGlobalSettings(true)} className="h-12 w-12 mx-auto rounded-xl flex items-center justify-center transition-all text-zinc-500 hover:text-white hover:bg-zinc-900"><Key className="h-5 w-5" /></button>
@@ -2823,8 +3175,10 @@ export default function App() {
                     onSelectClient={id => setRoute({ path: '/client', params: { id } })} 
                     onDeleteClient={id => setClients(clients.filter(c => c.id !== id))} 
                 />
-            ) : (
+            ) : view === 'models' ? (
                 <ModelManager models={models} onUpdateModels={setModels} />
+            ) : (
+                <FirmOverview clients={clients} />
             )}
         </div>
          {showGlobalSettings && <GlobalSettingsModal onClose={() => setShowGlobalSettings(false)} />}
