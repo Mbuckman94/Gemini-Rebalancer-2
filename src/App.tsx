@@ -2775,6 +2775,8 @@ const ClientList = ({ clients, onCreateClient, onSelectClient, onDeleteClient })
   );
 };
 
+let firmTiingoKeyIndex = 0;
+
 const FirmOverview = ({ clients }: any) => {
     const [activeTab, setActiveTab] = useState('Stocks');
     const [sortConfig, setSortConfig] = useState({ key: 'totalValue', direction: 'desc' });
@@ -2840,10 +2842,9 @@ const FirmOverview = ({ clients }: any) => {
         const start = end - (5 * 365 * 24 * 60 * 60);
         
         const toFetch = uniqueAssets.filter(a => a.bucket !== 'Bonds');
-        const batchSize = 5;
+        const batchSize = 15;
         const dataCache: any = {};
         const inFlightRequests = new Map();
-        let keyIndex = 0;
 
         const fetchTiingo = async (symbol: string, startTimestamp: number) => {
             const cleanSymbol = symbol.toUpperCase().replace(/[\.\/]/g, '-');
@@ -2867,42 +2868,18 @@ const FirmOverview = ({ clients }: any) => {
                 if (keys.length === 0) throw new Error("No API keys");
                 const maxAttempts = keys.length * 2;
                 while (attempts < maxAttempts) {
-                    const currentKey = keys[keyIndex % keys.length];
+                    const currentKey = keys[firmTiingoKeyIndex++ % keys.length];
                     const startDate = new Date(startTimestamp * 1000).toISOString().split('T')[0];
                     const url = `https://api.tiingo.com/tiingo/daily/${cleanSymbol}/prices?startDate=${startDate}&resampleFreq=daily&token=${currentKey}`;
                     let jsonResponse = null;
                     try {
-                        try {
-                            const res = await fetch(url);
-                            if (res.status === 429) throw new Error("429");
-                            if (res.ok) jsonResponse = await res.json();
-                        } catch (e: any) { if (e.message === "429") throw e; }
+                        const res = await fetch(url);
+                        if (res.status === 404 || res.status === 400) return null;
+                        if (res.status === 429) throw new Error("429");
+                        if (res.ok) jsonResponse = await res.json();
 
-                        if (!jsonResponse) {
-                            try {
-                                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-                                const res = await fetch(proxyUrl);
-                                if (res.status === 429) throw new Error("429");
-                                if (res.ok) jsonResponse = await res.json();
-                            } catch (e: any) { if (e.message === "429") throw e; }
-                        }
-
-                        if (!jsonResponse) {
-                            try {
-                                const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-                                const res = await fetch(proxyUrl);
-                                if (res.ok) {
-                                    const wrapper = await res.json();
-                                    if (wrapper.contents) {
-                                        const parsed = JSON.parse(wrapper.contents);
-                                        if (parsed.detail && parsed.detail.includes("throttle")) throw new Error("429");
-                                        jsonResponse = parsed;
-                                    }
-                                }
-                            } catch (e: any) { if (e.message === "429") throw e; }
-                        }
-
-                        if (jsonResponse && Array.isArray(jsonResponse) && jsonResponse.length > 0) {
+                        if (jsonResponse && Array.isArray(jsonResponse)) {
+                            if (jsonResponse.length === 0) return null;
                             const normalized = { t: jsonResponse.map((d: any) => new Date(d.date).getTime() / 1000), c: jsonResponse.map((d: any) => d.adjClose || d.close) };
                             safeSetItem(cacheKey, JSON.stringify({ timestamp: Date.now(), data: normalized }));
                             dataCache[cleanSymbol] = normalized;
@@ -2910,13 +2887,13 @@ const FirmOverview = ({ clients }: any) => {
                             return normalized;
                         }
                         throw new Error("Fetch failed");
-                    } catch (err) {
-                        keyIndex++;
+                    } catch (err: any) {
+                        if (err.message !== "429") return null;
                         attempts++;
                         await new Promise(r => setTimeout(r, 1000 + (attempts * 500)));
                     }
                 }
-                throw new Error(`Max retries exceeded for ${cleanSymbol}`);
+                return null;
             })();
 
             inFlightRequests.set(cacheKey, fetchPromise);
@@ -2960,7 +2937,12 @@ const FirmOverview = ({ clients }: any) => {
             if (a.bucket === 'Bonds') return a;
             const cleanSymbol = a.symbol.toUpperCase().replace(/[\.\/]/g, '-');
             const data = dataCache[cleanSymbol];
-            if (!data || !data.c || data.c.length < 2) return a;
+            if (!data || !data.c || data.c.length < 2) {
+                return {
+                    ...a,
+                    perf: { '1D': null, '1M': null, '3M': null, '6M': null, 'YTD': null, '1Y': null, '3Y': null, '5Y': null }
+                };
+            }
             
             const currentClose = data.c[data.c.length - 1];
             const prevClose = data.c[data.c.length - 2];
