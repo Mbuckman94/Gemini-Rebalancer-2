@@ -821,45 +821,49 @@ const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
   const ASSET_CLASSES = ["U.S. Equity", "Non-U.S. Equity", "Fixed Income", "Other", "Not Classified"];
 
   const stats = useMemo(() => {
-    const invested = positions.filter(p => {
+    const invested = positions.filter((p: any) => {
         const s = p.symbol.toUpperCase();
         return !CASH_TICKERS.some(t => s.includes(t)) && 
                !(p.description && p.description.toUpperCase().includes('CASH')) &&
                p.metadata?.assetClass !== 'Cash';
     });
 
-    const totalVal = invested.reduce((sum, p) => sum + (Number(p.currentValue) || 0), 0);
+    const totalCurrentVal = invested.reduce((sum: number, p: any) => sum + (Number(p.currentValue) || 0), 0);
+    const useTargets = totalCurrentVal === 0;
+    const totalBasis = useTargets ? invested.reduce((sum: number, p: any) => sum + (Number(p.targetPct) || 0), 0) : totalCurrentVal;
     
-    const equities = [];
-    const fixedIncome = [];
+    const equities: any[] = [];
+    const fixedIncome: any[] = [];
     let equityTotal = 0;
     let fiTotal = 0;
 
-    invested.forEach(p => {
+    invested.forEach((p: any) => {
+        const val = useTargets ? (Number(p.targetPct) || 0) : (Number(p.currentValue) || 0);
         const isFi = p.metadata?.assetClass === 'Fixed Income' || p.metadata?.assetClass === 'Municipal Bond' || isBond(p.symbol, p.description);
         if (isFi) {
-            fixedIncome.push(p);
-            fiTotal += (Number(p.currentValue) || 0);
+            fixedIncome.push({ ...p, _calcVal: val });
+            fiTotal += val;
         } else {
-            equities.push(p);
-            equityTotal += (Number(p.currentValue) || 0);
+            equities.push({ ...p, _calcVal: val });
+            equityTotal += val;
         }
     });
 
-    const aggregate = (assets, total, key) => {
-        const res = {};
+    const aggregate = (assets: any[], total: number, key: string) => {
+        const res: any = {};
         assets.forEach(p => {
             const k = p.metadata?.[key] || 'Unclassified';
-            const w = total > 0 ? (Number(p.currentValue) || 0) / total : 0;
+            const w = total > 0 ? p._calcVal / total : 0;
             res[k] = (res[k] || 0) + w;
         });
         return res;
     };
 
-    const allocation = ASSET_CLASSES.reduce((acc, curr) => ({ ...acc, [curr]: 0 }), {});
-    invested.forEach(p => {
+    const allocation: any = ASSET_CLASSES.reduce((acc, curr) => ({ ...acc, [curr]: 0 }), {});
+    invested.forEach((p: any) => {
         const k = p.metadata?.assetClass || 'Not Classified';
-        const w = totalVal > 0 ? (Number(p.currentValue) || 0) / totalVal : 0;
+        const val = useTargets ? (Number(p.targetPct) || 0) : (Number(p.currentValue) || 0);
+        const w = totalBasis > 0 ? val / totalBasis : 0;
         allocation[k] = (allocation[k] || 0) + w;
     });
 
@@ -874,7 +878,7 @@ const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
             Equity: aggregate(equities, equityTotal, 'country'),
             'Fixed Income': aggregate(fixedIncome, fiTotal, 'country')
         },
-        totalVal 
+        totalVal: totalCurrentVal 
     };
   }, [positions]);
 
@@ -1781,7 +1785,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
         - 3. sector options: "Technology", "Healthcare", "Financial Services", "Real Estate", "Energy", "Industrials", "Communication Services", "Consumer Defensive", "Consumer Cyclical", "Utilities", "Basic Materials".
         - 4. country: The primary country or region of risk.
         
-        Output valid JSON only. Do not include markdown formatting.
+        You must return a single, flat JSON object where the keys are the exact ticker symbols provided. Example structure: { "AAPL": { "assetClass": "U.S. Equity", "style": "Large-Growth", "sector": "Technology", "country": "United States", "logoTicker": null, "stateCode": null } }
       `;
       const result = await callGemini(`Classify these assets:\n${tickers}`, systemPrompt, true);
       const cleanResult = result.replace(/```json\n?|```/g, '').trim();
