@@ -9,6 +9,7 @@ import {
   RotateCcw, Landmark, MapPin, Key, Clock, ArrowDownAZ, ArrowUpAZ, 
   ArrowUpNarrowWide, ArrowDownWideNarrow, LayoutList, DollarSign, Eye, EyeOff
 } from 'lucide-react';
+import { GoogleGenAI } from "@google/genai";
 
 // --- CONFIGURATION & KEY MANAGEMENT ---
 const apiKey = process.env.GEMINI_API_KEY || ""; 
@@ -173,64 +174,35 @@ const trackApiUsage = (key) => {
     history[key].push(Date.now());
     const oneDay = 24 * 60 * 60 * 1000;
     const now = Date.now();
-    history[key] = history[key].filter(t => now - t < oneDay);
+    history[key] = history[key].filter((t: any) => now - t < oneDay);
     safeSetItem('tiingo_usage_log', JSON.stringify(history));
   } catch (e) {}
 };
 
-async function callGemini(prompt, systemInstruction = "", isJson = false) {
+async function callGemini(prompt: string, systemInstruction = "", isJson = false) {
   const userKey = localStorage.getItem('user_gemini_key');
   let keyToUse = userKey ? userKey.trim() : apiKey;
   
   if (!keyToUse) {
       console.warn("No Gemini API Key found. AI features may fail.");
+      throw new Error("Gemini API Key is missing. Please check your settings.");
   }
 
-  const models = [
-      "gemini-2.5-flash-preview-09-2025", 
-      "gemini-1.5-flash"
-  ];
-
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
-    ...(isJson && { generationConfig: { responseMimeType: "application/json" } })
-  };
-
-  let lastError = null;
-
-  for (const model of models) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${keyToUse}`;
-      let delay = 1000;
-      
-      for (let i = 0; i < 3; i++) { // Retry loop per model
-        try {
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          
-          if (!response.ok) {
-              const errText = await response.text().catch(() => response.statusText);
-              if (response.status === 401 || response.status === 403) {
-                  throw new Error(`Auth Error (${response.status}): Invalid API Key.`);
-              }
-              throw new Error(`API Error: ${response.status} ${errText}`);
+  try {
+      const ai = new GoogleGenAI({ apiKey: keyToUse });
+      const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: prompt,
+          config: {
+              systemInstruction: systemInstruction,
+              responseMimeType: isJson ? "application/json" : "text/plain",
           }
-          
-          const data = await response.json();
-          return data.candidates?.[0]?.content?.parts?.[0]?.text;
-        } catch (err) {
-          lastError = err;
-          if (err.message.includes("Auth Error")) throw err; // Stop immediately on auth error
-          if (i === 2) break; // Try next model
-          await new Promise(r => setTimeout(r, delay));
-          delay *= 2;
-        }
-      }
+      });
+      return response.text;
+  } catch (error) {
+      console.error("Gemini API Error:", error);
+      throw error;
   }
-  throw lastError || new Error("All models failed.");
 }
 
 const CASH_TICKERS = ["FDRXX", "FCASH", "SPAXX", "CASH", "MMDA", "USD", "CORE", "FZFXX", "SWVXX"];
@@ -377,7 +349,7 @@ const Button = ({ children, variant = 'primary', size = 'md', onClick, className
   );
 };
 
-const Card = ({ children, className = "", title, icon: Icon, onClick }) => (
+const Card = ({ children, className = "", title, icon: Icon, onClick }: any) => (
   <div onClick={onClick} className={`bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col transition-colors ${onClick ? 'cursor-pointer hover:border-zinc-600' : ''} ${className}`}>
     {(title || Icon) && (
       <div className="px-4 py-2.5 border-b border-zinc-800 bg-zinc-900/50 flex items-center gap-2">
@@ -934,8 +906,8 @@ const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
             <div className="flex flex-col h-full">
                 <Toggle value={sectorView} onChange={setSectorView} options={['Equity', 'Fixed Income']} />
                 <div className="space-y-1.5 max-h-[140px] overflow-y-auto pr-2 custom-scrollbar flex-1">
-                {Object.entries(stats.sectors[sectorView]).sort((a,b) => b[1]-a[1]).map(([k, v]) => (
-                    <div key={k} className="flex justify-between text-[11px] py-1 border-b border-zinc-800/30 last:border-0"><span className="text-zinc-500 font-medium truncate max-w-[140px]">{k}</span><span className="font-mono text-zinc-200 font-bold">{(v * 100).toFixed(1)}%</span></div>
+                {Object.entries(stats.sectors[sectorView]).sort((a: any, b: any) => b[1]-a[1]).map(([k, v]) => (
+                    <div key={k} className="flex justify-between text-[11px] py-1 border-b border-zinc-800/30 last:border-0"><span className="text-zinc-500 font-medium truncate max-w-[140px]">{k}</span><span className="font-mono text-zinc-200 font-bold">{((v as number) * 100).toFixed(1)}%</span></div>
                 ))}
                 {Object.keys(stats.sectors[sectorView]).length === 0 && <div className="text-center text-zinc-600 text-[10px] mt-4 italic">No {sectorView} assets found.</div>}
                 </div>
@@ -945,8 +917,8 @@ const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
             <div className="flex flex-col h-full">
                 <Toggle value={geoView} onChange={setGeoView} options={['Equity', 'Fixed Income']} />
                 <div className="space-y-1.5 max-h-[140px] overflow-y-auto pr-2 custom-scrollbar flex-1">
-                {Object.entries(stats.countries[geoView]).sort((a,b) => b[1]-a[1]).map(([k, v]) => (
-                    <div key={k} className="flex justify-between text-[11px] py-1 border-b border-zinc-800/30 last:border-0"><span className="text-zinc-500 font-medium truncate max-w-[140px]">{k}</span><span className="font-mono text-zinc-200 font-bold">{(v * 100).toFixed(1)}%</span></div>
+                {Object.entries(stats.countries[geoView]).sort((a: any, b: any) => b[1]-a[1]).map(([k, v]) => (
+                    <div key={k} className="flex justify-between text-[11px] py-1 border-b border-zinc-800/30 last:border-0"><span className="text-zinc-500 font-medium truncate max-w-[140px]">{k}</span><span className="font-mono text-zinc-200 font-bold">{((v as number) * 100).toFixed(1)}%</span></div>
                 ))}
                 {Object.keys(stats.countries[geoView]).length === 0 && <div className="text-center text-zinc-600 text-[10px] mt-4 italic">No {geoView} assets found.</div>}
                 </div>
@@ -1257,7 +1229,7 @@ const InsightsHub = ({ positions }) => {
           <div className="animate-in fade-in slide-in-from-bottom-2">
             {activeTab === 'news' && <div className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap">{insights.news || "No significant updates."}</div>}
             {activeTab === 'earnings' && <div className="grid grid-cols-4 gap-4">{insights.earnings.filter(e => nonCashSymbols.includes(e.symbol)).map(e => <div key={e.symbol} className="bg-zinc-950 p-4 rounded-xl border border-zinc-800"><div className="font-black text-white">{e.symbol}</div><div className="text-xs text-zinc-500">{e.date}</div></div>)}</div>}
-            {activeTab === 'analysts' && <div className="grid grid-cols-4 gap-4">{Object.entries(insights.analysts).map(([s, d]) => <div key={s} className="bg-zinc-950 p-4 rounded-xl border border-zinc-800"><div className="font-black text-white">{s}</div><div className="text-[10px] text-zinc-500 mt-1">BUY: {d.buy+d.strongBuy} | HOLD: {d.hold} | SELL: {d.sell}</div></div>)}</div>}
+            {activeTab === 'analysts' && <div className="grid grid-cols-4 gap-4">{Object.entries(insights.analysts).map(([s, d]: any) => <div key={s} className="bg-zinc-950 p-4 rounded-xl border border-zinc-800"><div className="font-black text-white">{s}</div><div className="text-[10px] text-zinc-500 mt-1">BUY: {d.buy+d.strongBuy} | HOLD: {d.hold} | SELL: {d.sell}</div></div>)}</div>}
           </div>
         )}
       </div>
@@ -1426,7 +1398,7 @@ const BacktestModal = ({ model, onClose }) => {
              for (let i = 0; i < uniqueTickers.length; i += batchSize) {
                 const batch = uniqueTickers.slice(i, i + batchSize);
                 setProgress(`Fetching assets...`);
-                await Promise.allSettled(batch.map(async (sym) => {
+                await Promise.allSettled(batch.map(async (sym: any) => {
                       const cleanSym = sym.toUpperCase().replace(/[\.\/]/g, '-');
                       if (localStorage.getItem(`tiingo_${cleanSym}_5Y`)) usedCache = true;
                       try { await fetchTiingo(sym, start); } catch(e) { failed.push(sym); }
@@ -1606,7 +1578,7 @@ const BacktestModal = ({ model, onClose }) => {
     </div>
   );
 };
-const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDeleteAccount }) => {
+const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDeleteAccount }: any) => {
   const [positions, setPositions] = useState(client.positions || []);
   const [isEnriching, setIsEnriching] = useState(false);
   const [isLive, setIsLive] = useState(false);
@@ -1665,7 +1637,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
     if (!isNaN(targetValNum) && targetValNum > 0) setPlannedValue(targetValNum);
     setIsAddingTicker(true);
 
-    const cleanPositions = positions.filter(p => {
+    const cleanPositions = positions.filter((p: any) => {
         if (p.quantity > 0) return true; 
         if (p.description && typeof p.description === 'string' && p.description.startsWith('Model:')) {
             return false; 
@@ -1678,7 +1650,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
     
     for (const alloc of model.allocations) {
       const symbol = alloc.symbol.toUpperCase();
-      let pos = existingMap.get(symbol);
+      let pos: any = existingMap.get(symbol);
       if (!pos) {
         let price = 0;
         try {
@@ -1697,7 +1669,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
       }
       newPositions.push(pos);
     }
-    existingMap.forEach((pos) => newPositions.push({ ...pos, targetPct: 0 }));
+    existingMap.forEach((pos: any) => newPositions.push({ ...pos, targetPct: 0 }));
     setPositions(newPositions); 
     setShowModelModal(false);
     setIsAddingTicker(false);
@@ -1782,7 +1754,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
     } finally { setIsAddingTicker(false); }
   };
 
-  const handleEnrich = async (overridePositions) => {
+  const handleEnrich = async (overridePositions?: any) => {
     const targetPositions = overridePositions || positions;
     setIsEnriching(true);
     try {
@@ -2310,7 +2282,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
     </div>
   );
 };
-const ClientDashboard = ({ client, onUpdateClient, onBack, models }) => {
+const ClientDashboard = ({ client, onUpdateClient, onBack, models }: any) => {
     const normalizedClient = useMemo(() => {
         if (client.accounts) return client;
         return {
