@@ -814,7 +814,7 @@ const Toggle = ({ value, onChange, options }) => (
     </div>
 );
 
-const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
+const AnalyticsDashboard = ({ positions, client, onUpdateClient, assetOverrides }: any) => {
   const [sectorView, setSectorView] = useState('Equity');
   const [geoView, setGeoView] = useState('Equity');
   
@@ -852,7 +852,13 @@ const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
     const aggregate = (assets: any[], total: number, key: string) => {
         const res: any = {};
         assets.forEach(p => {
-            const k = p.metadata?.[key] || 'Unclassified';
+            let k = 'Unclassified';
+            // Check overrides for style and sector
+            if (assetOverrides && assetOverrides[p.symbol] && assetOverrides[p.symbol][key]) {
+                k = assetOverrides[p.symbol][key];
+            } else {
+                k = p.metadata?.[key] || 'Unclassified';
+            }
             const w = total > 0 ? p._calcVal / total : 0;
             res[k] = (res[k] || 0) + w;
         });
@@ -880,7 +886,7 @@ const AnalyticsDashboard = ({ positions, client, onUpdateClient }) => {
         },
         totalVal: totalCurrentVal 
     };
-  }, [positions]);
+  }, [positions, assetOverrides]);
 
   return (
     <div className="flex flex-col bg-zinc-950">
@@ -1582,7 +1588,7 @@ const BacktestModal = ({ model, onClose }) => {
     </div>
   );
 };
-const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDeleteAccount }: any) => {
+const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDeleteAccount, assetOverrides, setAssetOverrides }: any) => {
   const [positions, setPositions] = useState(client.positions || []);
   const [isEnriching, setIsEnriching] = useState(false);
   const [isLive, setIsLive] = useState(false);
@@ -2148,7 +2154,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
             </div>
         )}
       <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col bg-zinc-950">
-        <AnalyticsDashboard positions={positions} client={client} onUpdateClient={onUpdateClient} />
+        <AnalyticsDashboard positions={positions} client={client} onUpdateClient={onUpdateClient} assetOverrides={assetOverrides} />
         <div className="px-8 py-8 max-w-[1600px] w-full mx-auto">
           <InsightsHub positions={positions} />
           <div className="bg-zinc-900/20 border border-zinc-800 rounded-2xl overflow-x-auto custom-scrollbar shadow-2xl">
@@ -2286,7 +2292,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
     </div>
   );
 };
-const ClientDashboard = ({ client, onUpdateClient, onBack, models }: any) => {
+const ClientDashboard = ({ client, onUpdateClient, onBack, models, assetOverrides, setAssetOverrides }: any) => {
     const normalizedClient = useMemo(() => {
         if (client.accounts) return client;
         return {
@@ -2469,6 +2475,8 @@ const ClientDashboard = ({ client, onUpdateClient, onBack, models }: any) => {
                     onUpdateClient={handleUpdateData}
                     onBack={onBack}
                     models={models}
+                    assetOverrides={assetOverrides}
+                    setAssetOverrides={setAssetOverrides}
                     isAggregated={activeTab === 'overview'}
                     onDeleteAccount={activeTab !== 'overview' ? () => handleDeleteAccount(activeTab) : undefined}
                 />
@@ -2777,12 +2785,18 @@ const ClientList = ({ clients, onCreateClient, onSelectClient, onDeleteClient })
 
 let firmTiingoKeyIndex = 0;
 
-const FirmOverview = ({ clients }: any) => {
+const FirmOverview = ({ clients, assetOverrides, setAssetOverrides }: any) => {
     const [activeTab, setActiveTab] = useState('Stocks');
     const [sortConfig, setSortConfig] = useState({ key: 'totalValue', direction: 'desc' });
     const [assets, setAssets] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [progress, setProgress] = useState('');
+    const [visibleColumns, setVisibleColumns] = useState({
+        symbol: true, description: true, totalValue: true, pctAUM: true,
+        size: true, style: true, sector: true,
+        'perf.1D': true, 'perf.1M': true, 'perf.3M': true, 'perf.6M': true, 'perf.YTD': true, 'perf.1Y': true, 'perf.3Y': true, 'perf.5Y': true
+    });
+    const [showColMenu, setShowColMenu] = useState(false);
     
     useEffect(() => {
         let totalFirmAUM = 0;
@@ -2806,7 +2820,7 @@ const FirmOverview = ({ clients }: any) => {
                         const isFi = p.metadata?.assetClass === 'Fixed Income' || p.metadata?.assetClass === 'Municipal Bond' || isBond(symbol, p.description);
                         if (isFi) {
                             bucket = 'Bonds';
-                        } else if ((symbol.length === 5 && symbol.endsWith('X')) || (p.description && (p.description.toUpperCase().includes('ETF') || p.description.toUpperCase().includes('FUND') || p.description.toUpperCase().includes('TRUST')))) {
+                        } else if ((symbol.length === 5 && symbol.endsWith('X')) || (p.description && /\b(ETF|FUND|TRUST)\b/i.test(p.description))) {
                             bucket = 'Funds & ETFs';
                         }
 
@@ -2816,7 +2830,8 @@ const FirmOverview = ({ clients }: any) => {
                             bucket,
                             totalValue: 0,
                             pctAUM: 0,
-                            perf: { '1D': null, '1M': null, '3M': null, '6M': null, 'YTD': null, '1Y': null, '3Y': null, '5Y': null }
+                            perf: { '1D': null, '1M': null, '3M': null, '6M': null, 'YTD': null, '1Y': null, '3Y': null, '5Y': null },
+                            metadata: p.metadata
                         });
                     }
                     
@@ -2966,6 +2981,28 @@ const FirmOverview = ({ clients }: any) => {
         setLoading(false);
     };
 
+    const handleOverrideChange = (symbol: string, field: string, value: string) => {
+        const currentOverrides = assetOverrides[symbol] || {};
+        let newOverrides = { ...currentOverrides };
+        
+        if (field === 'size' || field === 'style_factor') {
+            const asset = assets.find(a => a.symbol === symbol);
+            const currentFullStyle = currentOverrides.style || asset?.metadata?.style || 'Mid-Core';
+            const parts = currentFullStyle.split('-');
+            const curSize = parts[0];
+            const curFactor = parts.length > 1 ? parts[1] : 'Core';
+            
+            const newSize = field === 'size' ? value : (curSize || 'Mid');
+            const newFactor = field === 'style_factor' ? value : (curFactor || 'Core');
+            
+            newOverrides.style = `${newSize}-${newFactor}`;
+        } else {
+            newOverrides[field] = value;
+        }
+        
+        setAssetOverrides((prev: any) => ({ ...prev, [symbol]: newOverrides }));
+    };
+
     const handleSort = (key: string) => {
         setSortConfig(prev => ({
             key,
@@ -3012,6 +3049,7 @@ const FirmOverview = ({ clients }: any) => {
         ? [
             { key: 'symbol', label: 'Ticker' },
             { key: 'description', label: 'Asset Name' },
+            { key: 'sector', label: 'Sector' },
             { key: 'totalValue', label: 'Total Firm Value ($)' },
             { key: 'pctAUM', label: '% of Firm AUM' }
         ]
@@ -3020,6 +3058,9 @@ const FirmOverview = ({ clients }: any) => {
             { key: 'description', label: 'Asset Name' },
             { key: 'totalValue', label: 'Total Firm Value ($)' },
             { key: 'pctAUM', label: '% of Firm AUM' },
+            { key: 'size', label: 'Size' },
+            { key: 'style', label: 'Style' },
+            { key: 'sector', label: 'Sector' },
             { key: 'perf.1D', label: '1D' },
             { key: 'perf.1M', label: '1M' },
             { key: 'perf.3M', label: '3M' },
@@ -3030,11 +3071,38 @@ const FirmOverview = ({ clients }: any) => {
             { key: 'perf.5Y', label: '5Y' },
         ];
 
+    const visibleCols = columns.filter(c => visibleColumns[c.key] !== false);
+
     return (
         <div className="p-8 max-w-7xl mx-auto h-full flex flex-col">
-            <div className="mb-8">
-                <h1 className="text-3xl font-black text-white tracking-tighter mb-2">Firm Overview</h1>
-                <p className="text-zinc-500 font-medium">Aggregate position exposure and performance across all clients.</p>
+            <div className="mb-8 flex justify-between items-end">
+                <div>
+                    <h1 className="text-3xl font-black text-white tracking-tighter mb-2">Firm Overview</h1>
+                    <p className="text-zinc-500 font-medium">Aggregate position exposure and performance across all clients.</p>
+                </div>
+                <div className="relative">
+                    <button onClick={() => setShowColMenu(!showColMenu)} className="bg-zinc-900 hover:bg-zinc-800 text-zinc-500 hover:text-white p-2 rounded-xl transition-colors border border-zinc-800">
+                        <Settings className="h-5 w-5" />
+                    </button>
+                    {showColMenu && (
+                        <div className="absolute right-0 top-12 bg-zinc-900 border border-zinc-800 rounded-xl p-4 w-64 shadow-2xl z-50">
+                            <h4 className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-3">Visible Columns</h4>
+                            <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
+                                {Object.keys(visibleColumns).map(key => (
+                                    <label key={key} className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer hover:text-white">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={visibleColumns[key]} 
+                                            onChange={() => setVisibleColumns(prev => ({ ...prev, [key]: !prev[key] }))}
+                                            className="rounded border-zinc-700 bg-zinc-950 text-blue-500 focus:ring-0"
+                                        />
+                                        {key.replace('perf.', '')}
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
             </div>
 
             <div className="flex bg-zinc-950 p-1 rounded-xl mb-6 border border-zinc-800 w-fit">
@@ -3060,7 +3128,7 @@ const FirmOverview = ({ clients }: any) => {
                         <table className="w-full text-left border-collapse">
                             <thead className="sticky top-0 bg-zinc-900 border-b border-zinc-800 z-10">
                                 <tr>
-                                    {columns.map(col => (
+                                    {visibleCols.map(col => (
                                         <th 
                                             key={col.key} 
                                             onClick={() => handleSort(col.key)}
@@ -3072,29 +3140,60 @@ const FirmOverview = ({ clients }: any) => {
                                 </tr>
                             </thead>
                             <tbody>
-                                {sortedAssets.map((a, i) => (
-                                    <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
-                                        <td className="p-4 font-bold text-white">{a.symbol}</td>
-                                        <td className="p-4 text-zinc-400 text-sm truncate max-w-[200px]">{a.description}</td>
-                                        <td className="p-4 font-mono text-zinc-300">{formatCurrency(a.totalValue)}</td>
-                                        <td className="p-4 font-mono text-zinc-300">{a.pctAUM.toFixed(2)}%</td>
-                                        {activeTab !== 'Bonds' && (
-                                            <>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['1D'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['1M'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['3M'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['6M'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['YTD'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['1Y'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['3Y'])}</td>
-                                                <td className="p-4 font-mono text-sm">{formatPerf(a.perf['5Y'])}</td>
-                                            </>
-                                        )}
-                                    </tr>
-                                ))}
+                                {sortedAssets.map((a, i) => {
+                                    const overrides = assetOverrides[a.symbol] || {};
+                                    const fullStyle = overrides.style || a.metadata?.style || 'Mid-Core';
+                                    const [size, styleFactor] = fullStyle.split('-');
+                                    const sector = overrides.sector || a.metadata?.sector || 'Misc';
+
+                                    return (
+                                        <tr key={i} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors group">
+                                            {visibleCols.map(col => (
+                                                <td key={col.key} className="p-4">
+                                                    {col.key === 'symbol' ? <span className="font-bold text-white">{a.symbol}</span> :
+                                                     col.key === 'description' ? <span className="text-zinc-400 text-sm truncate max-w-[200px] block" title={a.description}>{a.description}</span> :
+                                                     col.key === 'totalValue' ? <span className="font-mono text-zinc-300">{formatCurrency(a.totalValue)}</span> :
+                                                     col.key === 'pctAUM' ? <span className="font-mono text-zinc-300">{a.pctAUM.toFixed(2)}%</span> :
+                                                     col.key === 'size' ? (
+                                                        <select 
+                                                            className="bg-transparent text-xs text-zinc-300 font-medium focus:outline-none focus:text-white cursor-pointer hover:bg-zinc-800 rounded px-1 -ml-1 py-0.5"
+                                                            value={size || 'Mid'}
+                                                            onChange={(e) => handleOverrideChange(a.symbol, 'size', e.target.value)}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            {['Large', 'Mid', 'Small'].map(o => <option key={o} value={o} className="bg-zinc-900">{o}</option>)}
+                                                        </select>
+                                                     ) :
+                                                     col.key === 'style' ? (
+                                                        <select 
+                                                            className="bg-transparent text-xs text-zinc-300 font-medium focus:outline-none focus:text-white cursor-pointer hover:bg-zinc-800 rounded px-1 -ml-1 py-0.5"
+                                                            value={styleFactor || 'Core'}
+                                                            onChange={(e) => handleOverrideChange(a.symbol, 'style_factor', e.target.value)}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            {['Value', 'Core', 'Growth'].map(o => <option key={o} value={o} className="bg-zinc-900">{o}</option>)}
+                                                        </select>
+                                                     ) :
+                                                     col.key === 'sector' ? (
+                                                        <select 
+                                                            className="bg-transparent text-xs text-zinc-300 font-medium focus:outline-none focus:text-white cursor-pointer hover:bg-zinc-800 rounded px-1 -ml-1 py-0.5 max-w-[120px]"
+                                                            value={sector}
+                                                            onChange={(e) => handleOverrideChange(a.symbol, 'sector', e.target.value)}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            {['Technology', 'Healthcare', 'Financial Services', 'Real Estate', 'Energy', 'Industrials', 'Communication Services', 'Consumer Defensive', 'Consumer Cyclical', 'Utilities', 'Basic Materials', 'Misc', 'Unclassified'].map(o => <option key={o} value={o} className="bg-zinc-900">{o}</option>)}
+                                                        </select>
+                                                     ) :
+                                                     col.key.startsWith('perf.') ? <span className="font-mono text-sm">{formatPerf(a.perf[col.key.split('.')[1]])}</span> :
+                                                     null}
+                                                </td>
+                                            ))}
+                                        </tr>
+                                    );
+                                })}
                                 {sortedAssets.length === 0 && (
                                     <tr>
-                                        <td colSpan={columns.length} className="p-8 text-center text-zinc-500 font-medium">
+                                        <td colSpan={visibleCols.length} className="p-8 text-center text-zinc-500 font-medium">
                                             No assets found in this category.
                                         </td>
                                     </tr>
@@ -3116,11 +3215,15 @@ export default function App() {
   const [models, setModels] = useState(() => {
     try { const saved = localStorage.getItem('rebalance_models'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
+  const [assetOverrides, setAssetOverrides] = useState(() => {
+      try { const saved = localStorage.getItem('rebalance_asset_overrides'); return saved ? JSON.parse(saved) : {}; } catch (e) { return {}; }
+  });
   const [route, setRoute] = useState({ path: '/', params: {} });
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
 
   useEffect(() => { localStorage.setItem('rebalance_db_v4', JSON.stringify(clients)); }, [clients]);
   useEffect(() => { localStorage.setItem('rebalance_models', JSON.stringify(models)); }, [models]);
+  useEffect(() => { localStorage.setItem('rebalance_asset_overrides', JSON.stringify(assetOverrides)); }, [assetOverrides]);
 
   if (route.path === '/client') {
     const client = clients.find(c => c.id === route.params.id);
@@ -3129,6 +3232,8 @@ export default function App() {
         <ClientDashboard 
             client={client} 
             models={models} 
+            assetOverrides={assetOverrides}
+            setAssetOverrides={setAssetOverrides}
             onBack={() => setRoute({ path: '/', params: {} })} 
             onUpdateClient={u => setClients(clients.map(c => c.id === u.id ? u : c))} 
         />
@@ -3160,7 +3265,7 @@ export default function App() {
             ) : view === 'models' ? (
                 <ModelManager models={models} onUpdateModels={setModels} />
             ) : (
-                <FirmOverview clients={clients} />
+                <FirmOverview clients={clients} assetOverrides={assetOverrides} setAssetOverrides={setAssetOverrides} />
             )}
         </div>
          {showGlobalSettings && <GlobalSettingsModal onClose={() => setShowGlobalSettings(false)} />}
