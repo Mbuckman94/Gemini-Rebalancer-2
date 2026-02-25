@@ -90,6 +90,9 @@ const DEFAULT_COLUMNS = [
   { id: 'quantity', label: 'Shares', width: 100, visible: true, align: 'right' },
   { id: 'price', label: 'Mkt Price', width: 100, visible: true, align: 'right' },
   { id: 'currentValue', label: 'Value', width: 120, visible: true, align: 'right' },
+  { id: 'costBasis', label: 'Cost Basis', width: 120, visible: true, align: 'right' },
+  { id: 'unrealizedGL', label: 'Unrealized G/L', width: 120, visible: true, align: 'right' },
+  { id: 'unrealizedGLPct', label: 'G/L %', width: 100, visible: true, align: 'right' },
   { id: 'yield', label: 'Yield', width: 80, visible: true, align: 'right' },
   { id: 'currentPct', label: 'Weight', width: 80, visible: true, align: 'right' },
   { id: 'targetPct', label: 'Goal %', width: 100, visible: true, align: 'right' },
@@ -188,20 +191,39 @@ async function callGemini(prompt: string, systemInstruction = "", isJson = false
       throw new Error("Gemini API Key is missing. Please check your settings.");
   }
 
-  try {
-      const ai = new GoogleGenAI({ apiKey: keyToUse });
-      const response = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: prompt,
-          config: {
-              systemInstruction: systemInstruction,
-              responseMimeType: isJson ? "application/json" : "text/plain",
+  const maxRetries = 5;
+  let attempt = 0;
+
+  while (attempt < maxRetries) {
+      try {
+          const ai = new GoogleGenAI({ apiKey: keyToUse });
+          const response = await ai.models.generateContent({
+              model: "gemini-3-flash-preview",
+              contents: prompt,
+              config: {
+                  systemInstruction: systemInstruction,
+                  responseMimeType: isJson ? "application/json" : "text/plain",
+              }
+          });
+          return response.text;
+      } catch (error: any) {
+          console.error(`Gemini API Error (Attempt ${attempt + 1}):`, error);
+          
+          // Check for rate limit (429) or service unavailable (503)
+          // The error object structure might vary, so we check multiple properties
+          const isRateLimit = error.message?.includes('429') || error.status === 429 || error.code === 429 || error.message?.includes('RESOURCE_EXHAUSTED') || (error.error && error.error.code === 429);
+          const isServiceUnavailable = error.message?.includes('503') || error.status === 503 || error.code === 503;
+
+          if ((isRateLimit || isServiceUnavailable) && attempt < maxRetries - 1) {
+              const delay = Math.pow(2, attempt) * 4000 + Math.random() * 2000; // Exponential backoff + jitter (start around 4-6s)
+              console.warn(`Rate limited. Retrying in ${Math.round(delay)}ms...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+              attempt++;
+              continue;
           }
-      });
-      return response.text;
-  } catch (error) {
-      console.error("Gemini API Error:", error);
-      throw error;
+          
+          throw error;
+      }
   }
 }
 
@@ -252,6 +274,7 @@ const parseFidelityCSV = (text) => {
     const qtyIdx = headers.findIndex(h => h.includes("Quantity"));
     const descIdx = headers.findIndex(h => h.includes("Security Description"));
     const priceIdx = headers.findIndex(h => h.includes("Last Price") || h.includes("Price") || h.includes("Close"));
+    const costBasisIdx = headers.findIndex(h => h.includes("Cost Basis Total") || h.includes("Cost Basis"));
 
     const parseLine = (line) => {
         const row = [];
@@ -306,6 +329,13 @@ const parseFidelityCSV = (text) => {
             }
         }
 
+        let costBasis = val; // Default to current value if missing
+        if (costBasisIdx > -1 && row[costBasisIdx]) {
+            const cbStr = row[costBasisIdx].replace(/[$,]/g, '');
+            const cbVal = parseFloat(cbStr);
+            if (!isNaN(cbVal)) costBasis = cbVal;
+        }
+
         results.push({
             id: generateId(),
             symbol: symbol,
@@ -313,6 +343,7 @@ const parseFidelityCSV = (text) => {
             quantity: quantity,
             price: price,
             currentValue: val,
+            costBasis: costBasis,
             yield: extractedYield, 
             targetPct: 0,
             roundingMode: 'exact',
@@ -1921,6 +1952,10 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
       const isBondPos = isBond(p.symbol, p.description);
       let tradeShares = 0;
       
+      const costBasis = p.costBasis || p.currentValue || 0;
+      const unrealizedGL = (Number(p.currentValue) || 0) - costBasis;
+      const unrealizedGLPct = costBasis > 0 ? (unrealizedGL / costBasis) : 0;
+
       if (p.price > 0) {
         if (isBondPos) {
             tradeShares = (tradeValue * 100) / p.price;
@@ -1939,7 +1974,7 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
         }
       }
 
-      return { ...p, currentPct, actualTargetValue: targetValue, actualTargetPct: totalValue > 0 ? (targetValue / totalValue) * 100 : 0, tradeValue, tradeShares };
+      return { ...p, currentPct, actualTargetValue: targetValue, actualTargetPct: totalValue > 0 ? (targetValue / totalValue) * 100 : 0, tradeValue, tradeShares, costBasis, unrealizedGL, unrealizedGLPct };
     });
 
     if (sortConfig.key) { 
@@ -1984,6 +2019,8 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
 
       return {
           value: all.reduce((s, p) => s + (p.currentValue || 0), 0),
+          costBasis: all.reduce((s, p) => s + (p.costBasis || 0), 0),
+          unrealizedGL: all.reduce((s, p) => s + (p.unrealizedGL || 0), 0),
           weight: all.reduce((s, p) => s + (p.currentPct || 0), 0),
           targetPct: all.reduce((s, p) => s + (p.targetPct || 0), 0),
           targetValue: all.reduce((s, p) => s + (p.actualTargetValue || 0), 0),
@@ -2068,6 +2105,16 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
           case 'quantity': return <span className="text-zinc-300 font-medium">{formatQuantity(p.quantity)}</span>;
           case 'price': return <span className="text-zinc-300 font-medium">{formatCurrency(p.price)}</span>;
           case 'currentValue': return <span className="font-bold text-white">{formatCurrency(p.currentValue)}</span>;
+          case 'costBasis': return (
+             <div className="relative w-full h-full p-0 hover:bg-zinc-900 cursor-pointer border border-transparent hover:border-zinc-700 transition-colors">
+                <input type="number" className="w-full h-full p-4 bg-transparent text-right font-mono text-xs text-zinc-500 focus:text-white focus:outline-none" value={p.costBasis || ''} placeholder="--" onChange={(e) => {
+                    const val = parseFloat(e.target.value) || 0;
+                    setPositions(positions.map(x => x.id === p.id ? { ...x, costBasis: val } : x));
+                }} />
+             </div>
+          );
+          case 'unrealizedGL': return <span className={`font-mono font-bold ${p.unrealizedGL > 0 ? 'text-green-500' : p.unrealizedGL < 0 ? 'text-red-500' : 'text-zinc-500'}`}>{formatCurrency(p.unrealizedGL)}</span>;
+          case 'unrealizedGLPct': return <span className={`font-mono font-bold ${p.unrealizedGLPct > 0 ? 'text-green-500' : p.unrealizedGLPct < 0 ? 'text-red-500' : 'text-zinc-500'}`}>{p.unrealizedGLPct > 0 ? '+' : ''}{(p.unrealizedGLPct * 100).toFixed(2)}%</span>;
           case 'yield': return (
              <div className="relative w-full h-full p-0 hover:bg-zinc-900 cursor-pointer border border-transparent hover:border-zinc-700 transition-colors">
                 <input type="number" className="w-full h-full p-4 bg-transparent text-right font-mono text-xs text-zinc-500 focus:text-white focus:outline-none" value={p.yield || ''} placeholder="--" onChange={(e) => {
@@ -2139,6 +2186,15 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
                     )}
                 </div>
                 <div className="flex items-center gap-3">
+                    {!isAggregated && (
+                        <button 
+                            onClick={() => onUpdateClient({ ...client, isMoneyMarket: !client.isMoneyMarket, lastUpdated: new Date().toISOString() })}
+                            className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest transition-all border ${client.isMoneyMarket ? 'bg-green-900/20 text-green-400 border-green-500/30 hover:bg-green-900/30' : 'bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:bg-zinc-800'}`}
+                        >
+                            <Banknote className="h-3.5 w-3.5" />
+                            Money Market
+                        </button>
+                    )}
                     {onDeleteAccount && (
                         <button onClick={onDeleteAccount} className="text-red-900 hover:text-red-500 transition-colors p-2 rounded-lg text-xs font-bold uppercase tracking-widest flex items-center gap-2">
                             <Trash2 className="h-3 w-3" /> Delete Account
@@ -2224,6 +2280,9 @@ const Rebalancer = ({ client, onUpdateClient, onBack, models, isAggregated, onDe
                           <td key={col.id} className={`p-4 ${col.align==='right'?'text-right':''} ${idx===0?'font-black uppercase tracking-widest text-[10px]':''} ${col.id==='currentValue'?'font-mono font-black text-white text-base':''} ${col.id==='currentPct'?'font-mono text-white font-bold':''} ${col.id==='targetPct'?'bg-blue-600/10 font-mono text-blue-400 font-bold':''} ${col.id==='actualTargetValue'?'bg-blue-600/10 font-mono text-blue-400 font-bold':''} ${col.id==='tradeValue'?'font-mono text-zinc-500 font-bold':''}`}>
                               {col.id === 'symbol' ? 'Total Portfolio' :
                                col.id === 'currentValue' ? formatCurrency(totals.value) :
+                               col.id === 'costBasis' ? formatCurrency(totals.costBasis) :
+                               col.id === 'unrealizedGL' ? <span className={totals.unrealizedGL > 0 ? 'text-green-500' : totals.unrealizedGL < 0 ? 'text-red-500' : ''}>{formatCurrency(totals.unrealizedGL)}</span> :
+                               col.id === 'unrealizedGLPct' ? <span className={totals.unrealizedGL > 0 ? 'text-green-500' : totals.unrealizedGL < 0 ? 'text-red-500' : ''}>{(totals.costBasis > 0 ? (totals.unrealizedGL / totals.costBasis) * 100 : 0).toFixed(2)}%</span> :
                                col.id === 'currentPct' ? formatPercent(totals.weight) :
                                col.id === 'targetPct' ? formatPercent(totals.targetPct/100) :
                                col.id === 'actualTargetValue' ? formatCurrency(totals.targetValue) :
@@ -2446,8 +2505,9 @@ const ClientDashboard = ({ client, onUpdateClient, onBack, models, assetOverride
                        <div key={acc.id} className="group relative flex items-center">
                            <button 
                                onClick={() => setActiveTab(acc.id)}
-                               className={`px-6 py-3 text-xs font-bold uppercase tracking-widest border-b-2 transition-all whitespace-nowrap ${activeTab === acc.id ? 'border-blue-500 text-white' : 'border-transparent text-zinc-500 hover:text-zinc-300'}`}
+                               className={`px-6 py-3 text-xs font-bold uppercase tracking-widest border-b-2 transition-all whitespace-nowrap flex items-center gap-2 ${activeTab === acc.id ? 'border-blue-500 text-white' : 'border-transparent text-zinc-500 hover:text-zinc-300'}`}
                            >
+                               {acc.isMoneyMarket && <Banknote className="h-3 w-3 text-green-500" />}
                                {acc.name}
                            </button>
                        </div>
